@@ -21,6 +21,8 @@ class ModuleRepository(private val context: Context) {
 
     // عنوان Content Provider الخاص بالبلوقن لتنفيذ الأوامر.
     private val pluginProviderUri = Uri.parse("content://com.yn.setbox.plugin.provider/settings")
+    private val pluginProviderGetUri = Uri.parse("content://com.yn.setbox.plugin.provider/get_setting")
+
 
     suspend fun getModules(): List<Module> {
         return withContext(Dispatchers.IO) {
@@ -92,34 +94,178 @@ class ModuleRepository(private val context: Context) {
     suspend fun applySettingsFromFile(modulePath: String, commandFileName: String): Boolean {
         return withContext(Dispatchers.IO) {
             val commandFile = File(modulePath, commandFileName)
-            if (!commandFile.exists()) return@withContext true // يعتبر نجاحًا لأنه لا يوجد شيء لتنفيذه.
+            if (!commandFile.exists()) return@withContext true
 
+            val lines = commandFile.readLines()
             var allSucceeded = true
-            commandFile.forEachLine { line ->
-                val trimmedLine = line.trim()
-                if (trimmedLine.isNotBlank() && !trimmedLine.startsWith("#")) {
-                    val parts = trimmedLine.split("\\s+".toRegex())
-                    if (parts.size >= 3) {
-                        val values = ContentValues().apply {
-                            put("table", parts[0]) // system, global, secure
-                            put("key", parts[1])   // اسم الإعداد
-                            put("value", parts.drop(2).joinToString(" ")) // القيمة
-                        }
-                        try {
-                            // إرسال الأمر إلى البلوقن لتنفيذه.
-                            val updatedRows = context.contentResolver.update(pluginProviderUri, values, null, null)
-                            if (updatedRows <= 0) {
-                                allSucceeded = false
-                            }
-                        } catch (e: Exception) {
-                            allSucceeded = false
-                        }
+            var i = 0
+            while (i < lines.size) {
+                val trimmedLine = lines[i].trim()
+                if (trimmedLine.startsWith("if")) {
+                    val (endIndex, success) = handleIfBlock(lines, i, modulePath)
+                    i = endIndex
+                    if (!success) allSucceeded = false
+                } else {
+                    if (!executeLine(trimmedLine)) {
+                        allSucceeded = false
                     }
                 }
+                i++
             }
             allSucceeded
         }
     }
+
+    private fun handleIfBlock(lines: List<String>, startIndex: Int, modulePath: String): Pair<Int, Boolean> {
+        var currentIndex = startIndex
+        var conditionMet = false
+        var blockSuccess = true
+
+        while (currentIndex < lines.size) {
+            val line = lines[currentIndex].trim()
+            when {
+                line.startsWith("if") || line.startsWith("elif") -> {
+                    if (conditionMet) {
+                        // تخطي هذا البلوك وبحث عن الـ `fi`
+                        currentIndex = findNextBlock(lines, currentIndex)
+                        continue
+                    }
+                    val condition = line.substringAfter("[").substringBefore("]").trim()
+                    val comparison = line.split(" ").filter { it.isNotBlank() }
+                    if (comparison.size >= 4) {
+                        val operator = comparison[2]
+                        val valueToCompare = comparison[3]
+                        val currentValue = getSettingValue("global", condition) // يمكنك تعديل الجدول هنا "system", "secure"
+
+                        if (evaluateCondition(currentValue, operator, valueToCompare)) {
+                            conditionMet = true
+                            val (endOfBlock, success) = executeBlock(lines, currentIndex + 1, modulePath)
+                            blockSuccess = success
+                            currentIndex = endOfBlock
+                            continue
+                        }
+                    }
+                }
+                line.startsWith("else") -> {
+                    if (conditionMet) {
+                       // تخطي هذا البلوك وبحث عن الـ `fi`
+                        currentIndex = findNextBlock(lines, currentIndex, seekFi = true)
+                        continue
+                    }
+                    val (endOfBlock, success) = executeBlock(lines, currentIndex + 1, modulePath)
+                    blockSuccess = success
+                    currentIndex = endOfBlock
+                    conditionMet = true // لضمان عدم تنفيذ أي elif أو else لاحقة
+                    continue
+                }
+                line.startsWith("fi") -> {
+                    return Pair(currentIndex, blockSuccess)
+                }
+            }
+            currentIndex++
+        }
+        return Pair(lines.size - 1, blockSuccess) // حالة عدم العثور على fi
+    }
+
+    private fun findNextBlock(lines: List<String>, startIndex: Int, seekFi: Boolean = false): Int {
+        var i = startIndex + 1
+        var nestedIfs = 0
+        while (i < lines.size) {
+            val line = lines[i].trim()
+            if (line.startsWith("if")) {
+                nestedIfs++
+            } else if (line.startsWith("fi")) {
+                if (nestedIfs == 0) {
+                     return if(seekFi) i else i -1
+                }
+                nestedIfs--
+            } else if (nestedIfs == 0 && (line.startsWith("elif") || line.startsWith("else")) && !seekFi) {
+                return i - 1
+            }
+            i++
+        }
+        return i-1
+    }
+
+
+    private fun executeBlock(lines: List<String>, startIndex: Int, modulePath: String): Pair<Int, Boolean> {
+        var i = startIndex
+        var allSucceeded = true
+        var nestedIfs = 0
+        while (i < lines.size) {
+            val line = lines[i].trim()
+            if(line.startsWith("if")) {
+                 nestedIfs++
+            } else if (nestedIfs > 0 && line.startsWith("fi")) {
+                nestedIfs--
+            } else if (nestedIfs == 0 && (line.startsWith("elif") || line.startsWith("else") || line.startsWith("fi"))) {
+                return Pair(i, allSucceeded)
+            }
+             if (!executeLine(line)) {
+                 allSucceeded = false
+             }
+            i++
+        }
+        return Pair(i, allSucceeded)
+    }
+
+    private fun evaluateCondition(currentValue: String?, operator: String, valueToCompare: String): Boolean {
+        if (currentValue == null) return false
+        return when (operator) {
+            "==" -> currentValue == valueToCompare
+            "!=" -> currentValue != valueToCompare
+            ">" -> currentValue.toIntOrNull() ?: 0 > valueToCompare.toIntOrNull() ?: 0
+            "<" -> currentValue.toIntOrNull() ?: 0 < valueToCompare.toIntOrNull() ?: 0
+            // يمكنك إضافة المزيد من العمليات هنا
+            else -> false
+        }
+    }
+
+
+    private fun executeLine(line: String): Boolean {
+        val trimmedLine = line.trim()
+        if (trimmedLine.isNotBlank() && !trimmedLine.startsWith("#")) {
+            val parts = trimmedLine.split("\\s+".toRegex())
+            if (parts.size >= 3) {
+                val values = ContentValues().apply {
+                    put("table", parts[0]) // system, global, secure
+                    put("key", parts[1])   // اسم الإعداد
+                    put("value", parts.drop(2).joinToString(" ")) // القيمة
+                }
+                try {
+                    val updatedRows = context.contentResolver.update(pluginProviderUri, values, null, null)
+                    return updatedRows > 0
+                } catch (e: Exception) {
+                    return false
+                }
+            }
+        }
+        return true // تعتبر الأسطر الفارغة أو التعليقات ناجحة
+    }
+
+    private fun getSettingValue(table: String, key: String): String? {
+        val selectionArgs = arrayOf(table, key)
+        try {
+            context.contentResolver.query(
+                pluginProviderGetUri,
+                null, // Projection
+                null, // Selection
+                selectionArgs, // Selection args
+                null // Sort order
+            )?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val valueIndex = cursor.getColumnIndex("value")
+                    if (valueIndex != -1) {
+                         return cursor.getString(valueIndex)
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            return null
+        }
+        return null
+    }
+
 
     suspend fun uninstallModule(module: Module): Boolean {
         return withContext(Dispatchers.IO) {
