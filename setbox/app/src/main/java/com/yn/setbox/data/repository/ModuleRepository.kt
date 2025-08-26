@@ -270,12 +270,48 @@ class ModuleRepository(private val context: Context) {
     suspend fun uninstallModule(module: Module): Boolean {
         return withContext(Dispatchers.IO) {
             try {
+                // استدعاء الدالة المحسنة لإعادة الإعدادات، يتم تجاهل النتيجة هنا للحفاظ على السلوك
+                revertModuleSettings(module)
                 // حذف مجلد الوحدة.
                 File(module.path).deleteRecursively()
                 true
             } catch (e: Exception) {
                 false
             }
+        }
+    }
+
+    /**
+     * يقرأ ملف "on" الخاص بالوحدة ويعيد كل الإعدادات المذكورة فيه إلى قيمتها الافتراضية.
+     * @return `true` إذا نجحت كل عمليات الإعادة، و`false` إذا فشلت إحداها.
+     */
+    suspend fun revertModuleSettings(module: Module): Boolean {
+        return withContext(Dispatchers.IO) {
+            val onFile = File(module.path, "on")
+            if (!onFile.exists()) return@withContext true
+
+            var allSucceeded = true
+            onFile.readLines().forEach { line ->
+                val trimmedLine = line.trim()
+                // تجاهل التعليقات والأسطر الفارغة والهياكل الشرطية
+                val isControlOrComment = trimmedLine.isBlank() ||
+                        trimmedLine.startsWith("#") ||
+                        trimmedLine.startsWith("if") ||
+                        trimmedLine.startsWith("fi") ||
+                        trimmedLine.startsWith("else") ||
+                        trimmedLine.startsWith("elif")
+
+                if (!isControlOrComment) {
+                    val parts = trimmedLine.split("\\s+".toRegex())
+                    if (parts.size >= 2) {
+                        val revertLine = "${parts[0]} ${parts[1]} default"
+                        if (!executeLine(revertLine)) {
+                            allSucceeded = false
+                        }
+                    }
+                }
+            }
+            allSucceeded
         }
     }
     

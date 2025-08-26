@@ -87,7 +87,8 @@ class ModuleViewModel(
 
     /**
      * تمكين أو تعطيل وحدة وتطبيق الإعدادات الموافقة.
-     * لا يتم حفظ الحالة بشكل دائم إلا إذا نجحت عملية تطبيق الإعدادات.
+     * عند التمكين، يتم تنفيذ ملف "on".
+     * عند التعطيل، يتم قراءة ملف "on" وإعادة كل الإعدادات إلى قيمتها الافتراضية.
      */
     fun setModuleEnabled(
         module: Module,
@@ -96,8 +97,12 @@ class ModuleViewModel(
         onResult: (success: Boolean) -> Unit
     ) {
         scope.launch {
-            val commandFileToRun = if (isEnabled) "on" else "off"
-            val success = repository.applySettingsFromFile(module.path, commandFileToRun)
+            val success = if (isEnabled) {
+                repository.applySettingsFromFile(module.path, "on")
+            } else {
+                // عند إيقاف التفعيل، قم بإعادة الإعدادات الافتراضية بناءً على ملف "on"
+                repository.revertModuleSettings(module)
+            }
             
             // إذا نجحت العملية، قم بحفظ الحالة الجديدة بشكل دائم.
             if (success) {

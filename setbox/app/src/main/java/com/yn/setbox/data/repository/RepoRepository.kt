@@ -83,8 +83,7 @@ class RepoRepository(private val context: Context) {
 
                 // حفظ الملفات التي تم تنزيلها.
                 saveContentToFile(modulePropContent, File(moduleDir, "module.prop"))
-                downloadAndSaveFile(remoteModule, "on", moduleDir) // اسم الملف on بدون امتداد
-                downloadAndSaveFile(remoteModule, "off", moduleDir) // اسم الملف off بدون امتداد
+                downloadAndSaveFile(remoteModule, "on", moduleDir)
 
                 true
             } catch (e: Exception) {
