@@ -3,8 +3,10 @@ package com.yn.setbox.data.repository
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
+import com.yn.setbox.core.AppPreferences
 import com.yn.setbox.data.model.Module
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.FileInputStream
@@ -13,7 +15,10 @@ import java.io.IOException
 import java.util.Properties
 import java.util.zip.ZipInputStream
 
-class ModuleRepository(private val context: Context) {
+class ModuleRepository(
+    private val context: Context,
+    private val appPreferences: AppPreferences // إضافة للوصول للنسخ الاحتياطية
+) {
 
     private val modulesRootPath by lazy { File(context.filesDir, "modules").absolutePath }
 
@@ -85,11 +90,34 @@ class ModuleRepository(private val context: Context) {
             val commandFile = File(modulePath, commandFileName)
             if (!commandFile.exists()) return@withContext true
 
+            val existingBackups = appPreferences.getSettingsBackup().first()
+            val newBackupsToSave = mutableMapOf<String, String>()
+
             val lines = commandFile.readLines()
             var allSucceeded = true
             var i = 0
             while (i < lines.size) {
                 val trimmedLine = lines[i].trim()
+                
+                // قم بعمل نسخة احتياطية قبل التنفيذ
+                if (trimmedLine.isNotBlank() && !trimmedLine.startsWith("#")) {
+                    val parts = trimmedLine.split("\\s+".toRegex())
+                    if (parts.size >= 3) {
+                        val table = parts[0]
+                        val key = parts[1]
+                        val backupKey = "$table:$key"
+
+                        // احفظ فقط إذا لم تكن هناك نسخة احتياطية بالفعل
+                        if (!existingBackups.containsKey(backupKey)) {
+                            val originalValue = getSettingValue(table, key)
+                            // تأكد من أن القيمة الأصلية ليست فارغة قبل حفظها
+                            if (originalValue != null) {
+                                newBackupsToSave[backupKey] = originalValue
+                            }
+                        }
+                    }
+                }
+
                 if (trimmedLine.startsWith("if")) {
                     val (endIndex, success) = handleIfBlock(lines, i, modulePath)
                     i = endIndex
@@ -101,6 +129,12 @@ class ModuleRepository(private val context: Context) {
                 }
                 i++
             }
+            
+            // حفظ كل النسخ الاحتياطية الجديدة دفعة واحدة
+            if (newBackupsToSave.isNotEmpty()) {
+                appPreferences.saveSettingsBackup(newBackupsToSave)
+            }
+            
             allSucceeded
         }
     }
@@ -118,8 +152,8 @@ class ModuleRepository(private val context: Context) {
                         currentIndex = findNextBlock(lines, currentIndex)
                         continue
                     }
-                    val expr = line.substringAfter(Regex("""^(if|elif)\\b""")).trim()
-                    val opRegex = Regex("""(==|!=|>=|<=|>|<)""")
+                    val expr = line.replace(Regex("^(if|elif)\\s+"), "").trim()
+                    val opRegex = Regex("(==|!=|>=|<=|>|<)")
                     val opMatch = opRegex.find(expr)
 
                     if (opMatch != null) {
@@ -301,6 +335,7 @@ class ModuleRepository(private val context: Context) {
             val onFile = File(module.path, "on")
             if (!onFile.exists()) return@withContext true
 
+            val backups = appPreferences.getSettingsBackup().first()
             var allSucceeded = true
             onFile.readLines().forEach { line ->
                 val trimmedLine = line.trim()
@@ -314,7 +349,14 @@ class ModuleRepository(private val context: Context) {
                 if (!isControlOrComment) {
                     val parts = trimmedLine.split("\\s+".toRegex())
                     if (parts.size >= 2) {
-                        val revertLine = "${parts[0]} ${parts[1]} default"
+                        val table = parts[0]
+                        val key = parts[1]
+                        val backupKey = "$table:$key"
+                        
+                        // استخدم القيمة من النسخة الاحتياطية إن وجدت، وإلا استخدم "default"
+                        val valueToRestore = backups[backupKey] ?: "default"
+                        
+                        val revertLine = "$table $key $valueToRestore"
                         if (!executeLine(revertLine)) {
                             allSucceeded = false
                         }

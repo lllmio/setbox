@@ -47,7 +47,7 @@ class MainActivity : ComponentActivity() {
         ShizukuManager.initialize()
 
         val appPreferences = AppPreferences(this)
-        val moduleRepository = ModuleRepository(this)
+        val moduleRepository = ModuleRepository(this, appPreferences) // <-- **تم التعديل هنا**
         val repoRepository = RepoRepository(this)
 
         setContent {

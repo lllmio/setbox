@@ -7,6 +7,7 @@ import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import org.json.JSONObject
 
 // تهيئة DataStore لحفظ الإعدادات بشكل دائم.
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
@@ -23,6 +24,8 @@ class AppPreferences(private val context: Context) {
         private val HUE_SHIFT_KEY = floatPreferencesKey("hue_shift_key")
         private val SATURATION_SHIFT_KEY = floatPreferencesKey("saturation_shift_key")
         private val MODULES_ENABLED_KEY = stringSetPreferencesKey("modules_enabled_key")
+        // مفتاح لتخزين نسخة احتياطية من الإعدادات الأصلية كـ JSON String.
+        private val ORIGINAL_SETTINGS_BACKUP_KEY = stringPreferencesKey("original_settings_backup")
     }
 
     // حفظ مجموعة معرفات الوحدات (Modules) المفعلة.
@@ -38,6 +41,46 @@ class AppPreferences(private val context: Context) {
             preferences[MODULES_ENABLED_KEY] ?: emptySet()
         }
     }
+
+    /**
+     * يحفظ خريطة النسخ الاحتياطية للإعدادات.
+     * يتم دمج الخريطة الجديدة مع الحالية لضمان عدم الكتابة فوق النسخ الاحتياطية القديمة.
+     */
+    suspend fun saveSettingsBackup(newBackups: Map<String, String>) {
+        val currentBackups = getSettingsBackup().first().toMutableMap()
+        newBackups.forEach { (key, value) ->
+            // أضف النسخة الاحتياطية فقط إذا لم تكن موجودة بالفعل
+            if (!currentBackups.containsKey(key)) {
+                currentBackups[key] = value
+            }
+        }
+        val jsonString = JSONObject(currentBackups as Map<*, *>).toString()
+        context.dataStore.edit { preferences ->
+            preferences[ORIGINAL_SETTINGS_BACKUP_KEY] = jsonString
+        }
+    }
+
+    /**
+     * يسترجع خريطة النسخ الاحتياطية للإعدادات.
+     */
+    fun getSettingsBackup(): Flow<Map<String, String>> {
+        return context.dataStore.data.map { preferences ->
+            val jsonString = preferences[ORIGINAL_SETTINGS_BACKUP_KEY] ?: "{}"
+            val map = mutableMapOf<String, String>()
+            try {
+                val jsonObject = JSONObject(jsonString)
+                val keys = jsonObject.keys()
+                while (keys.hasNext()) {
+                    val key = keys.next()
+                    map[key] = jsonObject.getString(key)
+                }
+            } catch (e: Exception) {
+                // تجاهل الخطأ إذا كان JSON غير صالح
+            }
+            map
+        }
+    }
+
 
     suspend fun saveLanguage(language: String) {
         context.dataStore.edit { preferences ->

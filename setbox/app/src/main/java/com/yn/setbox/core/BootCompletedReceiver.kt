@@ -22,7 +22,8 @@ class BootCompletedReceiver : BroadcastReceiver() {
         CoroutineScope(Dispatchers.IO).launch {
             try {
                 val appPreferences = AppPreferences(context)
-                val moduleRepository = ModuleRepository(context)
+                // تم تمرير appPreferences إلى ModuleRepository
+                val moduleRepository = ModuleRepository(context, appPreferences)
 
                 // الحصول على الوحدات التي كانت مفعلة قبل إعادة التشغيل.
                 val enabledIds = appPreferences.getEnabledModuleIds().first()
