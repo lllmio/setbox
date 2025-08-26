@@ -6,6 +6,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.yn.setbox.core.PermissionManager
 import com.yn.setbox.core.ShizukuManager
+import com.yn.setbox.core.PluginManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,11 +26,32 @@ class PermissionViewModel : ViewModel() {
         if (_activationState.value == PermissionManager.ActivationStatus.ACTIVATED) return
 
         viewModelScope.launch {
-            // 1. التحقق من تثبيت البلوقن.
-            if (!PermissionManager.isPluginInstalled(context)) {
-                _activationState.value = PermissionManager.ActivationStatus.PLUGIN_NOT_INSTALLED
-                return@launch
+            // 1. التحقق من تثبيت البلوقن
+            var isPluginReady = PermissionManager.isPluginInstalled(context)
+            if (!isPluginReady) {
+                Log.w("PermissionViewModel", "البلوقن غير مثبت.")
+
+                // تحقق إذا كان ممكن استخدام Root أو Shizuku لتثبيته تلقائيًا
+                val canInstall = PermissionManager.grantPermissionWithRoot() ||
+                                 (ShizukuManager.isReady.value && ShizukuManager.isPermissionGranted.value)
+
+                if (canInstall) {
+                    Log.d("PermissionViewModel", "محاولة تثبيت البلوقن تلقائيًا من assets...")
+                    isPluginReady = PluginManager.installPlugin(context)
+
+                    if (isPluginReady) {
+                        Log.i("PermissionViewModel", "تم تثبيت البلوقن بنجاح.")
+                    } else {
+                        Log.e("PermissionViewModel", "فشل تثبيت البلوقن تلقائيًا.")
+                        _activationState.value = PermissionManager.ActivationStatus.PLUGIN_NOT_INSTALLED
+                        return@launch
+                    }
+                } else {
+                    _activationState.value = PermissionManager.ActivationStatus.PLUGIN_NOT_INSTALLED
+                    return@launch
+                }
             }
+
             // 2. التحقق من وجود الصلاحية بالفعل.
             if (PermissionManager.hasWriteSecureSettingsPermission(context)) {
                 _activationState.value = PermissionManager.ActivationStatus.ACTIVATED
