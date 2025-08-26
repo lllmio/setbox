@@ -3,7 +3,6 @@ package com.yn.setbox.data.repository
 import android.content.ContentValues
 import android.content.Context
 import android.net.Uri
-import android.util.Log
 import com.yn.setbox.data.model.Module
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -14,15 +13,12 @@ import java.io.IOException
 import java.util.Properties
 import java.util.zip.ZipInputStream
 
-// مستودع لإدارة الوحدات المثبتة محليًا على الجهاز.
 class ModuleRepository(private val context: Context) {
 
     private val modulesRootPath by lazy { File(context.filesDir, "modules").absolutePath }
 
-    // عنوان Content Provider الخاص بالبلوقن لتنفيذ الأوامر.
     private val pluginProviderUri = Uri.parse("content://com.yn.setbox.plugin.provider/settings")
     private val pluginProviderGetUri = Uri.parse("content://com.yn.setbox.plugin.provider/get_setting")
-
 
     suspend fun getModules(): List<Module> {
         return withContext(Dispatchers.IO) {
@@ -44,7 +40,6 @@ class ModuleRepository(private val context: Context) {
         return withContext(Dispatchers.IO) {
             val tempDir = File(context.cacheDir, "unzip_temp_${System.currentTimeMillis()}").apply { mkdirs() }
             try {
-                // فك ضغط الملف المؤقت.
                 context.contentResolver.openInputStream(zipUri)?.use { inputStream ->
                     ZipInputStream(inputStream).use { zipInputStream ->
                         var entry = zipInputStream.nextEntry
@@ -60,13 +55,11 @@ class ModuleRepository(private val context: Context) {
                     }
                 } ?: return@withContext false
 
-                // قراءة module.prop للحصول على معرف الوحدة.
                 val modulePropFile = findModuleProp(tempDir) ?: throw IOException("لم يتم العثور على module.prop.")
                 val moduleContentDir = modulePropFile.parentFile ?: throw IOException("هيكل الوحدة غير صالح.")
                 val props = Properties().apply { load(FileInputStream(modulePropFile)) }
                 val moduleId = props.getProperty("id") ?: throw IOException("معرف الوحدة غير موجود.")
 
-                // نسخ محتويات الوحدة إلى المجلد الدائم.
                 val finalModuleDir = File(modulesRootPath, moduleId)
                 if (finalModuleDir.exists()) finalModuleDir.deleteRecursively()
                 finalModuleDir.mkdirs()
@@ -87,10 +80,6 @@ class ModuleRepository(private val context: Context) {
         return null
     }
 
-    /**
-     * يطبق الإعدادات من ملف الأوامر (on أو off) عبر التواصل مع البلوقن.
-     * @return `true` إذا نجح تنفيذ جميع الأوامر، و`false` إذا فشل أمر واحد على الأقل.
-     */
     suspend fun applySettingsFromFile(modulePath: String, commandFileName: String): Boolean {
         return withContext(Dispatchers.IO) {
             val commandFile = File(modulePath, commandFileName)
@@ -126,36 +115,45 @@ class ModuleRepository(private val context: Context) {
             when {
                 line.startsWith("if") || line.startsWith("elif") -> {
                     if (conditionMet) {
-                        // تخطي هذا البلوك وبحث عن الـ `fi`
                         currentIndex = findNextBlock(lines, currentIndex)
                         continue
                     }
-                    val condition = line.substringAfter("[").substringBefore("]").trim()
-                    val comparison = line.split(" ").filter { it.isNotBlank() }
-                    if (comparison.size >= 4) {
-                        val operator = comparison[2]
-                        val valueToCompare = comparison[3]
-                        val currentValue = getSettingValue("global", condition) // يمكنك تعديل الجدول هنا "system", "secure"
+                    val expr = line.substringAfter(Regex("""^(if|elif)\\b""")).trim()
+                    val opRegex = Regex("""(==|!=|>=|<=|>|<)""")
+                    val opMatch = opRegex.find(expr)
 
-                        if (evaluateCondition(currentValue, operator, valueToCompare)) {
+                    if (opMatch != null) {
+                        val operator = opMatch.value
+                        val leftRaw = expr.substring(0, opMatch.range.first).trim()
+                        val rightRaw = expr.substring(opMatch.range.last + 1).trim()
+
+                        val leftVal = resolveOperand(leftRaw)
+                        val rightVal = resolveOperand(rightRaw)
+
+                        if (evaluateConditionResolved(leftVal, operator, rightVal)) {
                             conditionMet = true
                             val (endOfBlock, success) = executeBlock(lines, currentIndex + 1, modulePath)
                             blockSuccess = success
                             currentIndex = endOfBlock
                             continue
+                        } else {
+                            currentIndex = findNextBlock(lines, currentIndex)
+                            continue
                         }
+                    } else {
+                        currentIndex = findNextBlock(lines, currentIndex)
+                        continue
                     }
                 }
                 line.startsWith("else") -> {
                     if (conditionMet) {
-                       // تخطي هذا البلوك وبحث عن الـ `fi`
                         currentIndex = findNextBlock(lines, currentIndex, seekFi = true)
                         continue
                     }
                     val (endOfBlock, success) = executeBlock(lines, currentIndex + 1, modulePath)
                     blockSuccess = success
                     currentIndex = endOfBlock
-                    conditionMet = true // لضمان عدم تنفيذ أي elif أو else لاحقة
+                    conditionMet = true
                     continue
                 }
                 line.startsWith("fi") -> {
@@ -164,7 +162,41 @@ class ModuleRepository(private val context: Context) {
             }
             currentIndex++
         }
-        return Pair(lines.size - 1, blockSuccess) // حالة عدم العثور على fi
+        return Pair(lines.size - 1, blockSuccess)
+    }
+
+    private fun resolveOperand(operandRaw: String): String? {
+        val trimmed = operandRaw.trim()
+        if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+            val inside = trimmed.substring(1, trimmed.length - 1).trim()
+            if (inside.isEmpty()) return null
+            val parts = inside.split("\\s+".toRegex())
+            val table = parts[0]
+            val key = parts.drop(1).joinToString(" ")
+            return getSettingValue(table, key)
+        } else {
+            if ((trimmed.startsWith("\"") && trimmed.endsWith("\"")) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+                return trimmed.substring(1, trimmed.length - 1)
+            }
+            return trimmed
+        }
+    }
+
+    private fun evaluateConditionResolved(leftVal: String?, operator: String, rightVal: String?): Boolean {
+        val l = leftVal ?: ""
+        val r = rightVal ?: ""
+        val lNum = l.toLongOrNull()
+        val rNum = r.toLongOrNull()
+
+        return when (operator) {
+            "==" -> if (lNum != null && rNum != null) lNum == rNum else l == r
+            "!=" -> if (lNum != null && rNum != null) lNum != rNum else l != r
+            ">" -> if (lNum != null && rNum != null) lNum > rNum else l > r
+            "<" -> if (lNum != null && rNum != null) lNum < rNum else l < r
+            ">=" -> if (lNum != null && rNum != null) lNum >= rNum else l >= r
+            "<=" -> if (lNum != null && rNum != null) lNum <= rNum else l <= r
+            else -> false
+        }
     }
 
     private fun findNextBlock(lines: List<String>, startIndex: Int, seekFi: Boolean = false): Int {
@@ -176,7 +208,7 @@ class ModuleRepository(private val context: Context) {
                 nestedIfs++
             } else if (line.startsWith("fi")) {
                 if (nestedIfs == 0) {
-                     return if(seekFi) i else i -1
+                    return if (seekFi) i else i - 1
                 }
                 nestedIfs--
             } else if (nestedIfs == 0 && (line.startsWith("elif") || line.startsWith("else")) && !seekFi) {
@@ -184,9 +216,8 @@ class ModuleRepository(private val context: Context) {
             }
             i++
         }
-        return i-1
+        return i - 1
     }
-
 
     private fun executeBlock(lines: List<String>, startIndex: Int, modulePath: String): Pair<Int, Boolean> {
         var i = startIndex
@@ -194,33 +225,20 @@ class ModuleRepository(private val context: Context) {
         var nestedIfs = 0
         while (i < lines.size) {
             val line = lines[i].trim()
-            if(line.startsWith("if")) {
-                 nestedIfs++
+            if (line.startsWith("if")) {
+                nestedIfs++
             } else if (nestedIfs > 0 && line.startsWith("fi")) {
                 nestedIfs--
             } else if (nestedIfs == 0 && (line.startsWith("elif") || line.startsWith("else") || line.startsWith("fi"))) {
                 return Pair(i, allSucceeded)
             }
-             if (!executeLine(line)) {
-                 allSucceeded = false
-             }
+            if (!executeLine(line)) {
+                allSucceeded = false
+            }
             i++
         }
         return Pair(i, allSucceeded)
     }
-
-    private fun evaluateCondition(currentValue: String?, operator: String, valueToCompare: String): Boolean {
-        if (currentValue == null) return false
-        return when (operator) {
-            "==" -> currentValue == valueToCompare
-            "!=" -> currentValue != valueToCompare
-            ">" -> currentValue.toIntOrNull() ?: 0 > valueToCompare.toIntOrNull() ?: 0
-            "<" -> currentValue.toIntOrNull() ?: 0 < valueToCompare.toIntOrNull() ?: 0
-            // يمكنك إضافة المزيد من العمليات هنا
-            else -> false
-        }
-    }
-
 
     private fun executeLine(line: String): Boolean {
         val trimmedLine = line.trim()
@@ -228,9 +246,9 @@ class ModuleRepository(private val context: Context) {
             val parts = trimmedLine.split("\\s+".toRegex())
             if (parts.size >= 3) {
                 val values = ContentValues().apply {
-                    put("table", parts[0]) // system, global, secure
-                    put("key", parts[1])   // اسم الإعداد
-                    put("value", parts.drop(2).joinToString(" ")) // القيمة
+                    put("table", parts[0])
+                    put("key", parts[1])
+                    put("value", parts.drop(2).joinToString(" "))
                 }
                 try {
                     val updatedRows = context.contentResolver.update(pluginProviderUri, values, null, null)
@@ -240,7 +258,7 @@ class ModuleRepository(private val context: Context) {
                 }
             }
         }
-        return true // تعتبر الأسطر الفارغة أو التعليقات ناجحة
+        return true
     }
 
     private fun getSettingValue(table: String, key: String): String? {
@@ -248,15 +266,15 @@ class ModuleRepository(private val context: Context) {
         try {
             context.contentResolver.query(
                 pluginProviderGetUri,
-                null, // Projection
-                null, // Selection
-                selectionArgs, // Selection args
-                null // Sort order
+                null,
+                null,
+                selectionArgs,
+                null
             )?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val valueIndex = cursor.getColumnIndex("value")
                     if (valueIndex != -1) {
-                         return cursor.getString(valueIndex)
+                        return cursor.getString(valueIndex)
                     }
                 }
             }
@@ -266,13 +284,10 @@ class ModuleRepository(private val context: Context) {
         return null
     }
 
-
     suspend fun uninstallModule(module: Module): Boolean {
         return withContext(Dispatchers.IO) {
             try {
-                // استدعاء الدالة المحسنة لإعادة الإعدادات، يتم تجاهل النتيجة هنا للحفاظ على السلوك
                 revertModuleSettings(module)
-                // حذف مجلد الوحدة.
                 File(module.path).deleteRecursively()
                 true
             } catch (e: Exception) {
@@ -281,10 +296,6 @@ class ModuleRepository(private val context: Context) {
         }
     }
 
-    /**
-     * يقرأ ملف "on" الخاص بالوحدة ويعيد كل الإعدادات المذكورة فيه إلى قيمتها الافتراضية.
-     * @return `true` إذا نجحت كل عمليات الإعادة، و`false` إذا فشلت إحداها.
-     */
     suspend fun revertModuleSettings(module: Module): Boolean {
         return withContext(Dispatchers.IO) {
             val onFile = File(module.path, "on")
@@ -293,7 +304,6 @@ class ModuleRepository(private val context: Context) {
             var allSucceeded = true
             onFile.readLines().forEach { line ->
                 val trimmedLine = line.trim()
-                // تجاهل التعليقات والأسطر الفارغة والهياكل الشرطية
                 val isControlOrComment = trimmedLine.isBlank() ||
                         trimmedLine.startsWith("#") ||
                         trimmedLine.startsWith("if") ||
@@ -314,8 +324,7 @@ class ModuleRepository(private val context: Context) {
             allSucceeded
         }
     }
-    
-    // يقرأ ملف module.prop ويحوله إلى كائن Module.
+
     private fun readModuleProp(modulePropFile: File): Module? {
         if (!modulePropFile.exists()) return null
         val props = Properties()
