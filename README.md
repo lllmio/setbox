@@ -35,7 +35,7 @@ The **SetBox** application requires a one-time activation using one of the follo
 - **ADB Command**: Grant permissions via ADB with the following command:
 
 ```bash
-adb pm grant com.yn.setbox.plugin android.permission.WRITE_SECURE_SETTINGS
+adb shell pm grant com.yn.setbox.plugin android.permission.WRITE_SECURE_SETTINGS
 ```
 
 ---
